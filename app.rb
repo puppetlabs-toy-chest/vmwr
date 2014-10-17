@@ -6,11 +6,7 @@ require 'base64'
 # A lot of hardcoded stuff here...because of laziness
 class VmwrApp < Sinatra::Base
   before do
-    if params[:key]
-      decoded = Base64.decode64(params[:key]).chomp.split(':', 2)
-      @user = decoded[0]
-      @password = decoded[1]
-    elsif request.env['HTTP_AUTHORIZATION']
+    if request.env['HTTP_AUTHORIZATION']
       decoded = Base64.decode64(request.env['HTTP_AUTHORIZATION'].split[1]).chomp.split(':', 2)
       @user = decoded[0]
       @password = decoded[1]
@@ -41,6 +37,38 @@ class VmwrApp < Sinatra::Base
       }).view
       vms.select { |v| v.name == name }.first
     end
+
+    def get_least_used(cluster)
+      hosts = Hash.new
+      hosts_sort = Hash.new
+
+      datacenter = @vim.serviceInstance.find_datacenter
+      datacenter.hostFolder.children.each do |folder|
+        next unless folder.name == cluster
+        folder.host.each do |host|
+          if (
+            (host.overallStatus == 'green') and
+            (! host.runtime.inMaintenanceMode)
+          )
+            hosts[host.name] = host
+            hosts_sort[host.name] = host.vm.length
+          end
+        end
+      end
+      hosts[hosts_sort.sort_by { |k,v| v }[0][0]]
+    end
+  end
+
+
+  # What tenant templates are available
+  get '/v1/:tenant/templates' do
+    vm_folder = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/templates")
+    vms = @vim.serviceContent.viewManager.CreateContainerView({
+      :container  => vm_folder,
+      :type       =>  ['VirtualMachine'],
+      :recursive  => true
+    }).view
+    vms.collect { |v| v.name }.to_json
   end
 
   # What state the VM is in
@@ -94,7 +122,7 @@ class VmwrApp < Sinatra::Base
     provision = data['provision'] == 'true' ? true : false
     flavor    = data['flavor'].nil? ? 'g1.micro' : data['flavor']
     template  = data['template'].nil? ? 'debian-7-x86_64' : data['template']
-    tobject   = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/templates/#{template}")
+    tobject   = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/templates/#{template}")
 
     # Linked cloning is the only option
     disks     = tobject.config.hardware.device.grep(RbVmomi::VIM::VirtualDisk)
@@ -116,10 +144,16 @@ class VmwrApp < Sinatra::Base
           }
         ]
       }
-      template.ReconfigVM_Task(:spec => spec).wait_for_completion
+      tobject.ReconfigVM_Task(:spec => spec).wait_for_completion
     end
 
-    relocateSpec = RbVmomi::VIM.VirtualMachineRelocateSpec(:diskMoveType => :moveChildMostDiskBacking)
+    $clone_target = get_least_used(tobject.runtime.host.parent.name)
+
+
+    relocateSpec = RbVmomi::VIM.VirtualMachineRelocateSpec(
+      :diskMoveType => :moveChildMostDiskBacking,
+      :host         => $clone_target
+    )
 
     # Random selection of core vs. ram numbers that make up "flavors"...also should be configurable.
     case flavor
