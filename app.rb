@@ -78,12 +78,20 @@ class VmwrApp < Sinatra::Base
 
   # A standard set of JSON
   get '/v1/:tenant/:name/info' do
-    get_vm(params[:tenant], params[:name]).summary.guest.props.to_json
+    vm = get_vm(params[:tenant], params[:name])
+    info = vm.summary.guest.props.merge({'tags' => JSON.parse(vm.config.annotation) })
+    info.to_json
   end
 
   # Get a single piece of information
   get '/v1/:tenant/:name/info/:param' do
-    get_vm(params[:tenant], params[:name]).summary.guest.props.to_hash[params[:param].to_sym]
+    vm = get_vm(params[:tenant], params[:name])
+    info = vm.summary.guest.props.merge({'tags' => JSON.parse(vm.config.annotation) })
+    if params[:param] == 'tags'
+      info[params[:param]].to_json
+    else
+      info[params[:param].to_sym]
+    end
   end
 
   # Shutdown VM
@@ -109,6 +117,56 @@ class VmwrApp < Sinatra::Base
     vm.Destroy_Task
   end
 
+  # Get VM inventory
+  get '/v1/:tenant/inventory' do
+    vms = @vim.serviceContent.viewManager.CreateContainerView({
+      :container  =>  @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/vmwr"),
+      :type       =>  ['VirtualMachine'],
+      :recursive  => true
+    })
+
+    objectSet = [{
+      :obj => vms,
+      :skip => true,
+      :selectSet => [ RbVmomi::VIM::TraversalSpec.new({
+          :name => 'gettingTheVMs',
+          :path => 'view',
+          :skip => false,
+          :type => 'ContainerView'
+      }) ]
+    }]
+
+    propSet = [{
+      :pathSet => [ 'name', 'config.annotation', 'summary.guest' ],
+      :type => 'VirtualMachine'
+    }]
+
+    results = @vim.propertyCollector.RetrievePropertiesEx({
+      :specSet => [{
+        :objectSet => objectSet,
+        :propSet   => propSet
+      }],
+      :options => { :maxObjects => nil }
+    })
+
+    objects = results.objects
+
+    while results.token
+      results = @vim.propertyCollector.ContinueRetrievePropertiesEx({:token => results.token})
+      objects += results.objects
+    end
+
+    inventory = {}
+
+    objects.each do |v|
+      inventory[v.propSet.select { |p| p[:name] == 'name' }.first[:val]] =
+        v.propSet.select { |p| p[:name] == 'summary.guest' }.first[:val].props.merge(
+          { 'tags' => JSON.parse(v.propSet.select { |p| p[:name] == 'config.annotation' }.first[:val])}
+        )
+    end
+    inventory.to_json
+  end
+
   # Create a new VM
   post '/v1/:tenant/:name' do
     request.body.rewind
@@ -118,11 +176,12 @@ class VmwrApp < Sinatra::Base
     else
       data = JSON.parse(body)
     end
-    poweron   = data['poweron']   == 'false' ? false : true
-    provision = data['provision'] == 'true' ? true : false
-    flavor    = data['flavor'].nil? ? 'g1.micro' : data['flavor']
-    template  = data['template'].nil? ? 'debian-7-x86_64' : data['template']
-    tobject   = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/templates/#{template}")
+    poweron     = data['poweron']   == 'false' ? false : true
+    provision   = data['provision'] == 'true' ? true : false
+    flavor      = data['flavor'].nil? ? 'g1.micro' : data['flavor']
+    template    = data['template'].nil? ? 'debian-7-x86_64' : data['template']
+    tobject     = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/templates/#{template}")
+    custom_tags = data['tags']
 
     # Linked cloning is the only option
     disks     = tobject.config.hardware.device.grep(RbVmomi::VIM::VirtualDisk)
@@ -148,7 +207,6 @@ class VmwrApp < Sinatra::Base
     end
 
     $clone_target = get_least_used(tobject.runtime.host.parent.name)
-
 
     relocateSpec = RbVmomi::VIM.VirtualMachineRelocateSpec(
       :diskMoveType => :moveChildMostDiskBacking,
@@ -180,16 +238,20 @@ class VmwrApp < Sinatra::Base
       cpus   = 6
     end
 
+    default_tags = {
+      'name'               => params[:name],
+      'created_by'         => @user,
+      'template'           => template,
+      'flavor'             => flavor,
+      'creation_timestamp' => Time.now.utc
+    }
+
+   tags = JSON.pretty_generate(default_tags.merge(custom_tags))
+
     config = RbVmomi::VIM.VirtualMachineConfigSpec(
       :memoryMB => memory,
       :numCPUs => cpus,
-      :annotation => JSON.pretty_generate({
-        name: params[:name],
-        created_by: @user,
-        template: template,
-        flavor: flavor,
-        creation_timestamp: Time.now.utc
-      })
+      :annotation => tags
     )
 
     spec = RbVmomi::VIM.VirtualMachineCloneSpec(
