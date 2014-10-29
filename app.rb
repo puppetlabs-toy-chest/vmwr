@@ -181,7 +181,7 @@ class VmwrApp < Sinatra::Base
     flavor      = data['flavor'].nil? ? 'g1.micro' : data['flavor']
     template    = data['template'].nil? ? 'debian-7-x86_64' : data['template']
     tobject     = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/templates/#{template}")
-    custom_tags = data['tags']
+    custom_tags = data['tags'] || {}
 
     # Linked cloning is the only option
     disks     = tobject.config.hardware.device.grep(RbVmomi::VIM::VirtualDisk)
