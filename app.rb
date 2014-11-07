@@ -1,21 +1,26 @@
 require 'sinatra'
+require 'sinatra/config_file'
 require 'rbvmomi'
 require 'json'
 require 'base64'
 
 # A lot of hardcoded stuff here...because of laziness
 class VmwrApp < Sinatra::Base
+  register Sinatra::ConfigFile
+
+  config_file File.expand_path('config/config.yaml', File.dirname(__FILE__))
+
   before do
     if request.env['HTTP_AUTHORIZATION']
       decoded = Base64.decode64(request.env['HTTP_AUTHORIZATION'].split[1]).chomp.split(':', 2)
       @user = decoded[0]
       @password = decoded[1]
     else
-      @user = 'vspheremonitor@puppetlabs.com'
-      @password = 'puppetlabs_monitor'
+      @user = settings.inventory_user
+      @password = settings.inventory_passwd
     end
     @vim = RbVmomi::VIM.connect(
-      :host     => 'vmware-vc1.ops.puppetlabs.net',
+      :host     => settings.vcenter_host,
       :user     => @user,
       :password => @password,
       :insecure => true
@@ -29,7 +34,7 @@ class VmwrApp < Sinatra::Base
   helpers do
     # There really has to be a better way to do this...
     def get_vm(tenant, name)
-      vm_folder = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{tenant}/vmwr")
+      vm_folder = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "#{settings.vcenter_dc}/vm/#{tenant}/vmwr")
       vms = @vim.serviceContent.viewManager.CreateContainerView({
         :container  => vm_folder,
         :type       =>  ['VirtualMachine'],
@@ -62,7 +67,7 @@ class VmwrApp < Sinatra::Base
 
   # What tenant templates are available
   get '/v1/:tenant/templates' do
-    vm_folder = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/templates")
+    vm_folder = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "#{settings.vcenter_dc}/vm/#{params[:tenant]}/templates")
     vms = @vim.serviceContent.viewManager.CreateContainerView({
       :container  => vm_folder,
       :type       =>  ['VirtualMachine'],
@@ -120,7 +125,7 @@ class VmwrApp < Sinatra::Base
   # Get VM inventory
   get '/v1/:tenant/inventory' do
     vms = @vim.serviceContent.viewManager.CreateContainerView({
-      :container  =>  @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/vmwr"),
+      :container  =>  @vim.searchIndex.FindByInventoryPath(:inventoryPath => "#{settings.vcenter_dc}/vm/#{params[:tenant]}/vmwr"),
       :type       =>  ['VirtualMachine'],
       :recursive  => true
     })
@@ -180,7 +185,7 @@ class VmwrApp < Sinatra::Base
     provision   = data['provision'] == 'true' ? true : false
     flavor      = data['flavor'].nil? ? 'g1.micro' : data['flavor']
     template    = data['template'].nil? ? 'debian-7-x86_64' : data['template']
-    tobject     = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/templates/#{template}")
+    tobject     = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "#{settings.vcenter_dc}/vm/#{params[:tenant]}/templates/#{template}")
     custom_tags = data['tags'] || {}
 
     # Linked cloning is the only option
@@ -262,7 +267,7 @@ class VmwrApp < Sinatra::Base
     )
 
     # vmwr expects a flat directory structure to put VMs in.
-    vm_folder = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "opdx1/vm/#{params[:tenant]}/vmwr")
+    vm_folder = @vim.searchIndex.FindByInventoryPath(:inventoryPath => "#{settings.vcenter_dc}/vm/#{params[:tenant]}/vmwr")
     tobject.CloneVM_Task(:folder => vm_folder, :name => params[:name], :spec => spec).wait_for_completion
   end
 end
