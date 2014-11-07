@@ -1,6 +1,7 @@
 source "http://rubygems.org"
 
 gem 'sinatra', require: 'sinatra/base'
+gem 'sinatra-contrib'
 gem 'rack', '1.5.2'
 gem 'rbvmomi', '1.6.0'
 
